@@ -22,3 +22,7 @@ logs/
 calibration.json
 *.csv
 *.parquet
+
+# Local dev notes that must NOT be published — contains Pi credentials,
+# hostname, internal network details. Keep this entry.
+CLAUDE.md
