@@ -26,7 +26,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from inclinometer.host.client import Error, Ready, Sample, open_stream
+from inclinometer.host.client import (
+    DEFAULT_REMOTE_DIR,
+    DEFAULT_REMOTE_HOST,
+    DEFAULT_REMOTE_UV,
+    Error,
+    Ready,
+    Sample,
+    open_stream,
+)
 from inclinometer.host.tilt import tilt_from_accel
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -64,7 +72,13 @@ class Broadcaster:
                     self._clients.discard(ws)
 
 
-def make_app(pi_host: str, odr: float) -> FastAPI:
+def make_app(
+    pi_host: str,
+    odr: float,
+    *,
+    remote_uv: str = DEFAULT_REMOTE_UV,
+    remote_dir: str = DEFAULT_REMOTE_DIR,
+) -> FastAPI:
     broadcaster = Broadcaster()
     state: dict = {"ready": None, "samples_seen": 0, "last_error": None}
     stream_task: asyncio.Task | None = None
@@ -85,7 +99,10 @@ def make_app(pi_host: str, odr: float) -> FastAPI:
             connected = False
 
             try:
-                async for ev in open_stream(host=pi_host, odr=odr):
+                async for ev in open_stream(
+                    host=pi_host, odr=odr,
+                    remote_uv=remote_uv, remote_dir=remote_dir,
+                ):
                     if isinstance(ev, Ready):
                         connected = True
                         backoff = BACKOFF_INITIAL_S
@@ -177,7 +194,15 @@ def make_app(pi_host: str, odr: float) -> FastAPI:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Inclinometer dashboard")
-    p.add_argument("--pi", default="analog@analog.local", help="ssh target for the Pi")
+    p.add_argument("--pi", default=DEFAULT_REMOTE_HOST,
+                   help=f"ssh target for the Pi (default: {DEFAULT_REMOTE_HOST}; "
+                        "env: INCLINOMETER_REMOTE_HOST)")
+    p.add_argument("--remote-uv", default=DEFAULT_REMOTE_UV,
+                   help=f"full path to uv on the Pi (default: {DEFAULT_REMOTE_UV}; "
+                        "env: INCLINOMETER_REMOTE_UV)")
+    p.add_argument("--remote-dir", default=DEFAULT_REMOTE_DIR,
+                   help=f"project directory on the Pi (default: {DEFAULT_REMOTE_DIR}; "
+                        "env: INCLINOMETER_REMOTE_DIR)")
     p.add_argument("--odr", type=float, default=125.0, help="requested ODR in Hz")
     p.add_argument("--host", default="127.0.0.1", help="bind address for the web server")
     p.add_argument("--port", type=int, default=8000)
@@ -188,7 +213,10 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    app = make_app(pi_host=args.pi, odr=args.odr)
+    app = make_app(
+        pi_host=args.pi, odr=args.odr,
+        remote_uv=args.remote_uv, remote_dir=args.remote_dir,
+    )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
 

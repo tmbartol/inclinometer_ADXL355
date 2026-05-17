@@ -85,9 +85,39 @@ uv run python scripts/read_once.py
 # Pi-side streamer (emits JSON lines on stdout, one per sample)
 uv run python -m inclinometer.stream --odr 125
 
-# Mac-side: spawn ssh, parse the stream, print samples
+# Mac-side dashboard: spawn ssh, parse the stream, serve at http://127.0.0.1:8000
+uv run python -m inclinometer.host.web
+
+# Mac-side debug client: just print samples to stdout (no UI)
 uv run python scripts/host_stream.py
 ```
+
+### Configuring for a different Pi
+
+The host-side tools default to a fresh Kuiper Linux setup: user `analog`,
+host `analog.local`, uv at `/home/analog/.local/bin/uv`, project at
+`/home/analog/inclinometer_ADXL355`. Override per-invocation with CLI flags:
+
+```bash
+uv run python -m inclinometer.host.web \
+    --pi pi@my-pi.local \
+    --remote-uv /home/pi/.local/bin/uv \
+    --remote-dir /home/pi/code/inclinometer_ADXL355
+```
+
+…or set environment variables once so you don't have to pass the flags:
+
+```bash
+export INCLINOMETER_REMOTE_HOST=pi@my-pi.local
+export INCLINOMETER_REMOTE_UV=/home/pi/.local/bin/uv
+export INCLINOMETER_REMOTE_DIR=/home/pi/code/inclinometer_ADXL355
+uv run python -m inclinometer.host.web
+```
+
+Both `inclinometer.host.web` and `scripts/host_stream.py` honor the same
+flags and env vars. CLI flags override env vars override defaults.
+
+You also need passwordless SSH to the Pi — `ssh-copy-id <user>@<host>` once.
 
 ## Layout
 

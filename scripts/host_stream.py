@@ -22,22 +22,31 @@ import subprocess
 import sys
 import time
 
-
-REMOTE_CMD_TEMPLATE = (
-    "/home/analog/.local/bin/uv run --directory /home/analog/inclinometer_ADXL355 "
-    "python -m inclinometer.stream --odr {odr}"
+from inclinometer.host.client import (
+    DEFAULT_REMOTE_DIR,
+    DEFAULT_REMOTE_HOST,
+    DEFAULT_REMOTE_UV,
+    build_remote_cmd,
 )
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Read ADXL355 stream from a remote Pi over SSH")
-    p.add_argument("--host", default="analog@analog.local", help="ssh target")
-    p.add_argument("--odr", default="125", help="ODR in Hz to request from the Pi")
+    p.add_argument("--host", default=DEFAULT_REMOTE_HOST,
+                   help=f"ssh target (default: {DEFAULT_REMOTE_HOST}; "
+                        "env: INCLINOMETER_REMOTE_HOST)")
+    p.add_argument("--remote-uv", default=DEFAULT_REMOTE_UV,
+                   help=f"full path to uv on the Pi (default: {DEFAULT_REMOTE_UV}; "
+                        "env: INCLINOMETER_REMOTE_UV)")
+    p.add_argument("--remote-dir", default=DEFAULT_REMOTE_DIR,
+                   help=f"project directory on the Pi (default: {DEFAULT_REMOTE_DIR}; "
+                        "env: INCLINOMETER_REMOTE_DIR)")
+    p.add_argument("--odr", type=float, default=125.0, help="ODR in Hz to request from the Pi")
     p.add_argument("--max-samples", type=int, default=0,
                    help="stop after N samples (0 = run until interrupted)")
     args = p.parse_args(argv)
 
-    remote = REMOTE_CMD_TEMPLATE.format(odr=args.odr)
+    remote = build_remote_cmd(args.remote_uv, args.remote_dir, args.odr)
     ssh_argv = [
         "ssh",
         "-o", "BatchMode=yes",            # fail if password would be required

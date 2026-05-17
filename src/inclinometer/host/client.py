@@ -8,15 +8,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shlex
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 
-REMOTE_CMD_TEMPLATE = (
-    "/home/analog/.local/bin/uv run --directory /home/analog/inclinometer_ADXL355 "
-    "python -m inclinometer.stream --odr {odr}"
-)
+# Defaults match a fresh Kuiper Linux Pi (user `analog`). Override per-call via
+# the keyword args on open_stream(), or globally via these env vars:
+#     INCLINOMETER_REMOTE_HOST  default ssh target (user@host)
+#     INCLINOMETER_REMOTE_UV    full path to uv on the Pi
+#     INCLINOMETER_REMOTE_DIR   project directory on the Pi
+DEFAULT_REMOTE_HOST = os.environ.get("INCLINOMETER_REMOTE_HOST", "analog@analog.local")
+DEFAULT_REMOTE_UV = os.environ.get("INCLINOMETER_REMOTE_UV", "/home/analog/.local/bin/uv")
+DEFAULT_REMOTE_DIR = os.environ.get("INCLINOMETER_REMOTE_DIR", "/home/analog/inclinometer_ADXL355")
+
+
+def build_remote_cmd(uv_path: str, project_dir: str, odr: float) -> str:
+    """Compose the remote shell command line that the host runs over SSH.
+
+    Quotes paths so values containing spaces or shell metacharacters survive
+    the remote shell's parsing.
+    """
+    return (
+        f"{shlex.quote(uv_path)} run --directory {shlex.quote(project_dir)} "
+        f"python -m inclinometer.stream --odr {odr:f}"
+    )
 
 
 @dataclass
@@ -42,13 +60,19 @@ class Error:
 Event = Sample | Ready | Error
 
 
-async def open_stream(host: str, odr: float) -> AsyncIterator[Event]:
+async def open_stream(
+    host: str,
+    odr: float,
+    *,
+    remote_uv: str = DEFAULT_REMOTE_UV,
+    remote_dir: str = DEFAULT_REMOTE_DIR,
+) -> AsyncIterator[Event]:
     """Spawn the remote streamer over SSH; yield parsed events forever.
 
     The subprocess is terminated when the generator is closed (the consumer
     breaks out of `async for` or the surrounding task is cancelled).
     """
-    remote = REMOTE_CMD_TEMPLATE.format(odr=odr)
+    remote = build_remote_cmd(remote_uv, remote_dir, odr)
     proc = await asyncio.create_subprocess_exec(
         "ssh",
         "-o", "BatchMode=yes",
