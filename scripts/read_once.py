@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import sys
 
-from inclinometer.adxl355 import ADXL355, ODR, Range
+from inclinometer.adxl355 import ADXL355
 
 
 def main() -> int:
     try:
-        with ADXL355(bus=0, device=0, range_=Range.G2, odr=ODR.R_125) as imu:
+        with ADXL355() as imu:
             s = imu.read_sample()
+            rate = imu.sampling_hz
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
+    print(f"sampling_frequency = {rate} Hz")
     print(f"X = {s.x_g:+.5f} g")
     print(f"Y = {s.y_g:+.5f} g")
     print(f"Z = {s.z_g:+.5f} g")

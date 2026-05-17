@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Inclinometer (ADXL355)</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root {
+    --bg: #0e0e10;
+    --panel: #18181b;
+    --fg: #e4e4e7;
+    --muted: #71717a;
+    --accent: #38bdf8;
+    --pitch: #f87171;
+    --roll:  #4ade80;
+    --incl:  #60a5fa;
+    --warn:  #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+    background: var(--bg); color: var(--fg);
+  }
+  header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 12px; }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.02em; }
+  .status { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .status.warn { color: var(--warn); }
+  .status.err  { color: #ef4444; }
+
+  .readout {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .card {
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 14px 18px;
+  }
+  .card label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+  .card .value {
+    margin-top: 6px;
+    font-size: 30px;
+    font-weight: 300;
+    font-variant-numeric: tabular-nums;
+  }
+  .card .unit { font-size: 14px; color: var(--muted); margin-left: 4px; }
+
+  .panel-plot { background: var(--panel); border-radius: 10px; padding: 6px; }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .hist-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  #ts { height: 340px; }
+  .hist { height: 220px; }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 4px 0 12px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .controls input[type=number] {
+    width: 60px;
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid #27272a;
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Inclinometer · ADXL355</h1>
+  <span class="status" id="status">connecting…</span>
+</header>
+
+<div class="readout">
+  <div class="card"><label>Pitch</label><div class="value"><span id="r-pitch">—</span><span class="unit">°</span></div></div>
+  <div class="card"><label>Roll</label> <div class="value"><span id="r-roll">—</span> <span class="unit">°</span></div></div>
+  <div class="card"><label>Inclination</label><div class="value"><span id="r-incl">—</span><span class="unit">°</span></div></div>
+  <div class="card"><label>Die temp</label><div class="value"><span id="r-temp">—</span><span class="unit">°C</span></div></div>
+</div>
+
+<div class="controls">
+  <label>Rolling-mean window
+    <input type="number" id="mean-window" min="0.1" max="60" step="0.1" value="1.0">
+    s
+  </label>
+  <label>Time-series visible
+    <input type="number" id="ts-window" min="5" max="120" step="5" value="30">
+    s
+  </label>
+  <span style="margin-left:auto">Histograms: last 60 s · ~<span id="sample-count">0</span> samples</span>
+</div>
+
+<div class="grid">
+  <div class="panel-plot"><div id="ts"></div></div>
+  <div class="hist-row">
+    <div class="panel-plot"><div class="hist" id="h-pitch"></div></div>
+    <div class="panel-plot"><div class="hist" id="h-roll"></div></div>
+    <div class="panel-plot"><div class="hist" id="h-incl"></div></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const HIST_WINDOW_S = 60;
+  const TS_REDRAW_MS  = 100;   // 10 Hz UI refresh for the time-series
+  const HIST_REDRAW_MS = 1000; // 1 Hz refresh for the histograms
+
+  const buf = [];              // ring of {t, pitch, roll, incl}
+  const tempBuf = [];          // ring of {t, T_c}
+  let needsRedraw = false;     // dirty bit; flipped per incoming sample
+  let lastReady = null;
+
+  // ---- DOM refs ----
+  const els = {
+    status: document.getElementById("status"),
+    pitch: document.getElementById("r-pitch"),
+    roll:  document.getElementById("r-roll"),
+    incl:  document.getElementById("r-incl"),
+    temp:  document.getElementById("r-temp"),
+    meanWin: document.getElementById("mean-window"),
+    tsWin:   document.getElementById("ts-window"),
+    sampleCount: document.getElementById("sample-count"),
+  };
+
+  // ---- Plotly layouts ----
+  const plotlyConfig = { responsive: true, displayModeBar: false };
+  const baseLayout = {
+    paper_bgcolor: "rgba(0,0,0,0)",
+    plot_bgcolor:  "rgba(0,0,0,0)",
+    font: { color: "#a1a1aa", family: "-apple-system, BlinkMacSystemFont, Inter, sans-serif", size: 11 },
+    margin: { l: 50, r: 14, t: 8, b: 36 },
+    showlegend: true,
+    legend: { orientation: "h", x: 0, y: 1.16, bgcolor: "rgba(0,0,0,0)" },
+    xaxis: { gridcolor: "#27272a", zerolinecolor: "#3f3f46" },
+    yaxis: { gridcolor: "#27272a", zerolinecolor: "#3f3f46", title: "angle (°)" },
+  };
+
+  function initPlots() {
+    const empty = { x: [], y: [], type: "scatter", mode: "lines" };
+    Plotly.newPlot("ts", [
+      { ...empty, name: "pitch",          line: { color: "#f87171", width: 1 } },
+      { ...empty, name: "pitch (mean)",   line: { color: "#fca5a5", width: 2, dash: "dot" } },
+      { ...empty, name: "roll",           line: { color: "#4ade80", width: 1 } },
+      { ...empty, name: "roll (mean)",    line: { color: "#86efac", width: 2, dash: "dot" } },
+      { ...empty, name: "incl",           line: { color: "#60a5fa", width: 1 } },
+      { ...empty, name: "incl (mean)",    line: { color: "#93c5fd", width: 2, dash: "dot" } },
+    ], { ...baseLayout, xaxis: { ...baseLayout.xaxis, title: "time (s)" } }, plotlyConfig);
+
+    for (const [id, color, title] of [
+      ["h-pitch", "#f87171", "pitch (°)"],
+      ["h-roll",  "#4ade80", "roll (°)"],
+      ["h-incl",  "#60a5fa", "inclination (°)"],
+    ]) {
+      Plotly.newPlot(id, [
+        { x: [], type: "histogram", marker: { color: color, line: { color: "#0e0e10", width: 1 } }, nbinsx: 40 },
+      ], {
+        ...baseLayout,
+        showlegend: false,
+        margin: { l: 36, r: 8, t: 8, b: 36 },
+        xaxis: { ...baseLayout.xaxis, title: title },
+        yaxis: { ...baseLayout.yaxis, title: "count" },
+      }, plotlyConfig);
+    }
+  }
+
+  // ---- buffer / math ----
+  function trimBuffers(now) {
+    const cutoff = now - HIST_WINDOW_S;
+    let i = 0;
+    while (i < buf.length && buf[i].t < cutoff) i++;
+    if (i > 0) buf.splice(0, i);
+    let j = 0;
+    while (j < tempBuf.length && tempBuf[j].t < cutoff) j++;
+    if (j > 0) tempBuf.splice(0, j);
+  }
+
+  function rollingMean(channel, windowS) {
+    // Sliding-window mean over samples within the last `windowS` seconds at
+    // each point. O(n) total.
+    const out = new Array(buf.length);
+    let sum = 0;
+    let lo = 0;
+    for (let i = 0; i < buf.length; i++) {
+      sum += buf[i][channel];
+      while (lo < i && buf[lo].t < buf[i].t - windowS) {
+        sum -= buf[lo][channel];
+        lo++;
+      }
+      out[i] = sum / (i - lo + 1);
+    }
+    return out;
+  }
+
+  // ---- redraws ----
+  function redrawTimeSeries() {
+    if (!needsRedraw || buf.length === 0) return;
+    needsRedraw = false;
+
+    const meanWin = Math.max(0.05, parseFloat(els.meanWin.value) || 1.0);
+    const tsWin   = Math.max(1,    parseFloat(els.tsWin.value)   || 30);
+    const tNow = buf[buf.length - 1].t;
+    const tMin = tNow - tsWin;
+
+    // Build x as seconds-ago (negative going left) so the right edge is "now".
+    const xs = [];
+    const pitch = [], roll = [], incl = [];
+    let firstVisible = 0;
+    while (firstVisible < buf.length && buf[firstVisible].t < tMin) firstVisible++;
+    for (let i = firstVisible; i < buf.length; i++) {
+      const s = buf[i];
+      xs.push(s.t - tNow);
+      pitch.push(s.pitch);
+      roll.push(s.roll);
+      incl.push(s.incl);
+    }
+    const meanP = rollingMean("pitch", meanWin).slice(firstVisible);
+    const meanR = rollingMean("roll",  meanWin).slice(firstVisible);
+    const meanI = rollingMean("incl",  meanWin).slice(firstVisible);
+
+    Plotly.react("ts",
+      [
+        { x: xs, y: pitch, type: "scatter", mode: "lines", name: "pitch",        line: { color: "#f87171", width: 1 } },
+        { x: xs, y: meanP, type: "scatter", mode: "lines", name: "pitch (mean)", line: { color: "#fca5a5", width: 2, dash: "dot" } },
+        { x: xs, y: roll,  type: "scatter", mode: "lines", name: "roll",         line: { color: "#4ade80", width: 1 } },
+        { x: xs, y: meanR, type: "scatter", mode: "lines", name: "roll (mean)",  line: { color: "#86efac", width: 2, dash: "dot" } },
+        { x: xs, y: incl,  type: "scatter", mode: "lines", name: "incl",         line: { color: "#60a5fa", width: 1 } },
+        { x: xs, y: meanI, type: "scatter", mode: "lines", name: "incl (mean)",  line: { color: "#93c5fd", width: 2, dash: "dot" } },
+      ],
+      { ...baseLayout, xaxis: { ...baseLayout.xaxis, title: "time (s, 0 = now)", range: [-tsWin, 0] } },
+      plotlyConfig,
+    );
+  }
+
+  function redrawHistograms() {
+    if (buf.length === 0) return;
+    const pitch = buf.map(s => s.pitch);
+    const roll  = buf.map(s => s.roll);
+    const incl  = buf.map(s => s.incl);
+    Plotly.restyle("h-pitch", { x: [pitch] });
+    Plotly.restyle("h-roll",  { x: [roll]  });
+    Plotly.restyle("h-incl",  { x: [incl]  });
+    els.sampleCount.textContent = buf.length;
+  }
+
+  // ---- WebSocket wiring ----
+  function setStatus(text, cls = "") {
+    els.status.textContent = text;
+    els.status.className = "status" + (cls ? " " + cls : "");
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    setStatus("connecting…");
+    ws.onopen = () => {
+      const rateMsg = lastReady
+        ? `connected · sensor @ ${lastReady.actual_hz.toFixed(2)} Hz`
+        : "connected · waiting for sensor…";
+      setStatus(rateMsg);
+    };
+    ws.onclose = () => {
+      setStatus("disconnected · retrying in 2 s", "warn");
+      setTimeout(connect, 2000);
+    };
+    ws.onerror = () => setStatus("websocket error", "err");
+    ws.onmessage = (msg) => {
+      let obj;
+      try { obj = JSON.parse(msg.data); } catch { return; }
+
+      if (obj.event === "ready") {
+        lastReady = { requested_hz: obj.requested_hz, actual_hz: obj.actual_hz };
+        const note = obj.requested_hz !== obj.actual_hz ? "  (requested " + obj.requested_hz + " Hz, rate-set denied)" : "";
+        setStatus(`connected · sensor @ ${obj.actual_hz.toFixed(2)} Hz${note}`,
+                  obj.requested_hz !== obj.actual_hz ? "warn" : "");
+        return;
+      }
+      if (obj.event === "connecting") {
+        lastReady = null;
+        setStatus(`connecting to sensor @ ${obj.host}…`, "warn");
+        return;
+      }
+      if (obj.event === "disconnected") {
+        lastReady = null;
+        const wait = obj.retry_in_s != null ? ` · retrying in ${obj.retry_in_s.toFixed(0)}s` : "";
+        setStatus(`sensor disconnected${wait}`, "warn");
+        return;
+      }
+      if (obj.event === "error") {
+        setStatus("stream error: " + obj.msg, "err");
+        return;
+      }
+
+      buf.push({ t: obj.t, pitch: obj.pitch, roll: obj.roll, incl: obj.incl });
+      tempBuf.push({ t: obj.t, T_c: obj.T_c });
+      trimBuffers(obj.t);
+      needsRedraw = true;
+
+      // Live numeric readout updates every sample (cheap).
+      els.pitch.textContent = obj.pitch.toFixed(2);
+      els.roll.textContent  = obj.roll.toFixed(2);
+      els.incl.textContent  = obj.incl.toFixed(2);
+      els.temp.textContent  = obj.T_c.toFixed(1);
+    };
+  }
+
+  // ---- boot ----
+  initPlots();
+  connect();
+  setInterval(redrawTimeSeries, TS_REDRAW_MS);
+  setInterval(redrawHistograms, HIST_REDRAW_MS);
+})();
+</script>
+
+</body>
+</html>

@@ -5,12 +5,9 @@ description = "Inclinometer app using the Analog Devices ADXL355 over SPI on Ras
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "numpy>=1.26",
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
-    "pydantic>=2.6",
-    # spidev is Linux-only; installs on Pi, skipped on macOS dev machine.
-    "spidev>=3.6 ; sys_platform == 'linux'",
+    # Pi-side has zero runtime deps: it reads the ADXL355 via the kernel IIO
+    # sysfs interface (Kuiper Linux binds the chip via `dtoverlay=rpi-adxl355`).
+    # Host-side deps (numpy, FastAPI, ...) live in the `host` group below.
 ]
 
 [build-system]
@@ -21,6 +18,14 @@ build-backend = "hatchling.build"
 packages = ["src/inclinometer"]
 
 [dependency-groups]
+# Host-side (Mac / workstation): tilt math + dashboard. Install with:
+#     uv sync --group host --group dev
+host = [
+    "numpy>=1.26",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.6",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.4",

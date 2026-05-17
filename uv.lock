@@ -128,33 +128,31 @@ wheels = [
 name = "inclinometer"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
-    { name = "fastapi" },
-    { name = "numpy" },
-    { name = "pydantic" },
-    { name = "spidev", marker = "sys_platform == 'linux'" },
-    { name = "uvicorn", extra = ["standard"] },
-]
 
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+host = [
+    { name = "fastapi" },
+    { name = "numpy" },
+    { name = "pydantic" },
+    { name = "uvicorn", extra = ["standard"] },
+]
 
 [package.metadata]
-requires-dist = [
-    { name = "fastapi", specifier = ">=0.110" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "pydantic", specifier = ">=2.6" },
-    { name = "spidev", marker = "sys_platform == 'linux'", specifier = ">=3.6" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
-]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.4" },
+]
+host = [
+    { name = "fastapi", specifier = ">=0.110" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "pydantic", specifier = ">=2.6" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
 
 [[package]]
@@ -493,12 +491,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ab/a6/870a3e8a50590bb92be184ad928c2922f088b00d9dc5c5ec7b924ee08c22/ruff-0.15.13-py3-none-win_amd64.whl", hash = "sha256:7064884d442b7d477b4e7473d12da7f08851d2b1982763c5d3f388a19468a1a4", size = 11900409, upload-time = "2026-05-14T13:44:30.389Z" },
     { url = "https://files.pythonhosted.org/packages/9b/36/9c015cd052fca743dae8cb2aeb16b551444787467db42ceab0fc968865af/ruff-0.15.13-py3-none-win_arm64.whl", hash = "sha256:2471da9bd1068c8c064b5fd9c0c4b6dddffd6369cb1cd68b29993b1709ff1b21", size = 11179336, upload-time = "2026-05-14T13:44:33.026Z" },
 ]
-
-[[package]]
-name = "spidev"
-version = "3.8"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/67/87/039b6eeea781598015b538691bc174cc0bf77df9d4d2d3b8bf9245c0de8c/spidev-3.8.tar.gz", hash = "sha256:2bc02fb8c6312d519ebf1f4331067427c0921d3f77b8bcaf05189a2e8b8382c0", size = 13893, upload-time = "2025-09-15T18:56:20.672Z" }
 
 [[package]]
 name = "starlette"

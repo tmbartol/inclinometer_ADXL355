@@ -1,64 +1,29 @@
-"""Driver for the Analog Devices ADXL355 3-axis accelerometer over SPI.
+"""Read the ADXL355 via the kernel IIO sysfs interface on Linux.
 
-Datasheet: ADXL355 Rev. B (Analog Devices). All register numbers, scale factors,
-and the temperature-conversion constants below come from there.
+On Analog Devices' Kuiper Linux for Raspberry Pi, the `dtoverlay=rpi-adxl355`
+device-tree overlay binds the ADXL355 (on SPI0/CE0) to the in-kernel `adxl355`
+IIO driver and exposes it at `/sys/bus/iio/devices/iio:device0`. We read
+samples through sysfs files — no raw SPI from userspace.
 
-SPI framing: first byte is (addr << 1) | R/W, with R/W = 1 for read.
-Multi-byte transfers auto-increment the register address.
+IIO accelerometer ABI: `processed = raw * scale`, where `scale` is m/s² per LSB.
+We divide by g to report values in g. Temperature ABI:
+`millideg_C = (raw + offset) * scale`.
+
+Setting `in_accel_sampling_frequency` requires write access to a root-owned
+0644 file. If we can't write it (run as user `analog` with default perms), the
+driver leaves the existing rate in place and emits a warning to stderr. To
+allow non-root rate changes, install a udev rule — see the project README.
 """
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
-from enum import IntEnum
+from pathlib import Path
 
-try:
-    import spidev  # Linux-only
-except ImportError:
-    spidev = None  # type: ignore[assignment]
-
-
-# --- Register map ---------------------------------------------------------
-
-DEVID_AD = 0x00     # expect 0xAD
-DEVID_MST = 0x01    # expect 0x1D
-PARTID = 0x02       # expect 0xED
-REVID = 0x03
-STATUS = 0x04
-FIFO_ENTRIES = 0x05
-TEMP2 = 0x06        # 4 MSB of 12-bit temperature
-TEMP1 = 0x07        # 8 LSB of 12-bit temperature
-XDATA3 = 0x08       # start of 9 consecutive bytes of XYZ data (20-bit signed each)
-FILTER = 0x28
-RANGE = 0x2C
-POWER_CTL = 0x2D
-RESET = 0x2F
-
-
-class Range(IntEnum):
-    """Accelerometer full-scale range. Values are the RANGE register bits [1:0]."""
-    G2 = 0b01   # ±2.048 g, 256000 LSB/g
-    G4 = 0b10   # ±4.096 g, 128000 LSB/g
-    G8 = 0b11   # ±8.192 g,  64000 LSB/g
-
-
-# LSB-per-g for each range (datasheet).
-_LSB_PER_G = {Range.G2: 256_000.0, Range.G4: 128_000.0, Range.G8: 64_000.0}
-
-
-class ODR(IntEnum):
-    """Output data rate / low-pass corner. Written to FILTER[3:0]. LPF = ODR/4."""
-    R_4000 = 0x0
-    R_2000 = 0x1
-    R_1000 = 0x2
-    R_500 = 0x3
-    R_250 = 0x4
-    R_125 = 0x5
-    R_62_5 = 0x6
-    R_31_25 = 0x7
-    R_15_625 = 0x8
-    R_7_8125 = 0x9
-    R_3_90625 = 0xA
+GRAVITY_MS2 = 9.80665
+DEFAULT_IIO_PATH = Path("/sys/bus/iio/devices/iio:device0")
+EXPECTED_NAME = "adxl355"
 
 
 @dataclass(frozen=True)
@@ -71,104 +36,96 @@ class Sample:
 
 
 class ADXL355:
-    """ADXL355 over Linux SPI via spidev.
+    """ADXL355 reader backed by the Linux IIO sysfs interface.
 
-    Typical use:
-        with ADXL355(bus=0, device=0) as imu:
-            print(imu.read_sample())
+    Usage:
+        with ADXL355(sampling_hz=125) as imu:
+            sample = imu.read_sample()
     """
-
-    # ADXL355 spec: SPI mode 0, MSB first, up to 10 MHz.
-    SPI_MODE = 0b00
-    DEFAULT_HZ = 5_000_000
 
     def __init__(
         self,
-        bus: int = 0,
-        device: int = 0,
+        iio_path: Path | str = DEFAULT_IIO_PATH,
         *,
-        spi_hz: int = DEFAULT_HZ,
-        range_: Range = Range.G2,
-        odr: ODR = ODR.R_125,
+        sampling_hz: float | None = None,
     ) -> None:
-        if spidev is None:
-            raise RuntimeError(
-                "spidev is not installed. The ADXL355 driver only runs on Linux "
-                "(e.g. Raspberry Pi). On macOS, develop here but run on the Pi."
-            )
-        self._spi = spidev.SpiDev()
-        self._spi.open(bus, device)
-        self._spi.max_speed_hz = spi_hz
-        self._spi.mode = self.SPI_MODE
-        self._range = range_
-        self._lsb_per_g = _LSB_PER_G[range_]
-        self._configure(range_, odr)
+        self._dev = Path(iio_path)
 
-    # --- context manager -------------------------------------------------
+        name_path = self._dev / "name"
+        if not name_path.exists():
+            raise FileNotFoundError(
+                f"{name_path} not found. Is the IIO driver bound? On Kuiper Linux, "
+                "verify `dtoverlay=rpi-adxl355` is in /boot/config.txt and reboot."
+            )
+        actual_name = name_path.read_text().strip()
+        if actual_name != EXPECTED_NAME:
+            raise RuntimeError(
+                f"{self._dev} reports name={actual_name!r}, expected {EXPECTED_NAME!r}. "
+                "Wrong IIO device index?"
+            )
+
+        self._x = self._dev / "in_accel_x_raw"
+        self._y = self._dev / "in_accel_y_raw"
+        self._z = self._dev / "in_accel_z_raw"
+        self._t = self._dev / "in_temp_raw"
+
+        # Cache scale and temperature-conversion constants; they only change if
+        # the device is reconfigured to a different range.
+        scale_mps2_per_lsb = float((self._dev / "in_accel_scale").read_text())
+        self.accel_g_per_lsb = scale_mps2_per_lsb / GRAVITY_MS2
+        self._temp_scale_milliC = float((self._dev / "in_temp_scale").read_text())
+        self._temp_offset_lsb = float((self._dev / "in_temp_offset").read_text())
+
+        if sampling_hz is not None:
+            self._try_set_sampling(float(sampling_hz))
+
+        self.sampling_hz = self._current_sampling_hz()
+
+    # -- context manager: nothing to release (sysfs is read-on-demand) ----
 
     def __enter__(self) -> "ADXL355":
         return self
 
     def __exit__(self, *exc: object) -> None:
-        self.close()
+        pass
 
     def close(self) -> None:
-        self._spi.close()
+        pass
 
-    # --- low-level register I/O ------------------------------------------
-
-    def _read(self, reg: int, n: int = 1) -> list[int]:
-        # First byte: (addr << 1) | R/W bit (1 = read).
-        tx = [(reg << 1) | 0x01] + [0x00] * n
-        rx = self._spi.xfer2(tx)
-        return rx[1:]
-
-    def _write(self, reg: int, value: int) -> None:
-        self._spi.xfer2([(reg << 1) & 0xFE, value & 0xFF])
-
-    # --- configuration ---------------------------------------------------
-
-    def _configure(self, range_: Range, odr: ODR) -> None:
-        # Verify part ID before touching anything else — catches wiring errors early.
-        dev_ad, dev_mst, part = self._read(DEVID_AD, 3)
-        if (dev_ad, dev_mst, part) != (0xAD, 0x1D, 0xED):
-            raise RuntimeError(
-                f"ADXL355 not detected: got DEVID_AD={dev_ad:#04x} "
-                f"DEVID_MST={dev_mst:#04x} PARTID={part:#04x} "
-                "(expected 0xAD, 0x1D, 0xED). Check wiring, SPI mode, and CS line."
-            )
-
-        # Enter standby to change config (datasheet requires STANDBY=1 for register writes
-        # to RANGE/FILTER to take effect cleanly).
-        self._write(POWER_CTL, 0x01)
-        self._write(RANGE, int(range_) & 0x03)
-        self._write(FILTER, int(odr) & 0x0F)
-        # Leave standby → measurement mode.
-        self._write(POWER_CTL, 0x00)
-
-    # --- sample read -----------------------------------------------------
+    # -- public API --------------------------------------------------------
 
     def read_sample(self) -> Sample:
-        """Read one acceleration sample plus die temperature."""
-        # Burst-read 9 bytes starting at XDATA3: X3 X2 X1 Y3 Y2 Y1 Z3 Z2 Z1.
-        raw = self._read(XDATA3, 9)
-        x = self._g_from_bytes(raw[0], raw[1], raw[2])
-        y = self._g_from_bytes(raw[3], raw[4], raw[5])
-        z = self._g_from_bytes(raw[6], raw[7], raw[8])
-        return Sample(x_g=x, y_g=y, z_g=z, temp_c=self.read_temp_c())
+        x_raw = int(self._x.read_text())
+        y_raw = int(self._y.read_text())
+        z_raw = int(self._z.read_text())
+        t_raw = int(self._t.read_text())
+        return Sample(
+            x_g=x_raw * self.accel_g_per_lsb,
+            y_g=y_raw * self.accel_g_per_lsb,
+            z_g=z_raw * self.accel_g_per_lsb,
+            temp_c=(t_raw + self._temp_offset_lsb) * self._temp_scale_milliC / 1000.0,
+        )
 
-    def read_temp_c(self) -> float:
-        """Read on-die temperature in degrees Celsius.
+    def available_sampling_hz(self) -> list[float]:
+        return [
+            float(x)
+            for x in (self._dev / "in_accel_sampling_frequency_available").read_text().split()
+        ]
 
-        Datasheet: 12-bit; intercept 1852 LSB at 25 °C, slope -9.05 LSB/°C.
-        """
-        hi, lo = self._read(TEMP2, 2)
-        raw = ((hi & 0x0F) << 8) | lo
-        return (raw - 1852) / -9.05 + 25.0
+    # -- internals ---------------------------------------------------------
 
-    def _g_from_bytes(self, b2: int, b1: int, b0: int) -> float:
-        # 20-bit signed, packed MSB-first into 3 bytes; lower nibble of b0 unused.
-        raw = (b2 << 12) | (b1 << 4) | (b0 >> 4)
-        if raw & 0x80000:
-            raw -= 0x100000  # sign-extend 20-bit two's complement
-        return raw / self._lsb_per_g
+    def _current_sampling_hz(self) -> float:
+        return float((self._dev / "in_accel_sampling_frequency").read_text())
+
+    def _try_set_sampling(self, hz: float) -> None:
+        p = self._dev / "in_accel_sampling_frequency"
+        try:
+            p.write_text(f"{hz:f}\n")
+        except PermissionError:
+            print(
+                f"[adxl355] WARNING: cannot set sampling_frequency to {hz} Hz "
+                f"({p} is root-owned 0644). Leaving it at "
+                f"{self._current_sampling_hz()} Hz. To allow non-root writes, "
+                "install the udev rule from the project README.",
+                file=sys.stderr,
+            )
